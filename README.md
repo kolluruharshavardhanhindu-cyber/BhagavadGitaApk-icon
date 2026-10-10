@@ -24,18 +24,15 @@ This Android WebView project packages the website from the supplied `V6-glass.zi
 
 Some website resources (such as online fonts or remote scripts) require internet access.
 
-## Launcher icon sizing (original image unchanged)
+## Launcher icon
 
-This project intentionally uses the supplied original logo image unchanged in the five
-`mipmap-*` folders. It does not define `mipmap-anydpi-v26/ic_launcher.xml` or
-`ic_launcher_round.xml`, because those adaptive-icon XML files can cause Android
-launchers to fit the entire logo inside the adaptive icon safe zone, making it look
-smaller than expected.
+Android 8+ launchers only treat an icon as full-size if the app ships an *adaptive icon*.
+Without `mipmap-anydpi-v26/ic_launcher.xml`, the launcher shrinks the plain PNG and puts it
+on a backdrop, which looks small. This project now ships:
 
-If you are updating an existing GitHub repository, check for these two files:
-- `app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml`
-- `app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml`
+- `mipmap-anydpi-v26/ic_launcher.xml` and `ic_launcher_round.xml` (adaptive icons)
+- `drawable-nodpi/ic_launcher_foreground.png` (artwork, trimmed of white margin, filling the 72dp safe zone)
+- `values/ic_launcher_background.xml` (gold background colour for the area outside the safe zone)
+- trimmed `mipmap-*/ic_launcher*.png` for Android 7 and below
 
-If either exists in your repository, delete it and commit the deletion, then rebuild.
-Do not edit or crop the original PNG. The launcher may still apply the phone's own
-shape mask, so the exact appearance varies by Android launcher.
+Do not delete the `mipmap-anydpi-v26` folder.
