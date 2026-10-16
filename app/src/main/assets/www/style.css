@@ -246,3 +246,14 @@ body{
 }
 
 /* Play All / range-player popup styles live in v6.css (single implementation). */
+
+/* తాత్పర్యం heading is a real button: click / Enter / Space hides the explanation */
+button.tatparyam-panel-header{
+  -webkit-appearance: none; appearance: none;
+  background: transparent; border: 0; padding: 2px 0; margin: 0 0 8px; width: 100%;
+  text-align: left; cursor: pointer; font-family: inherit;
+  border-radius: 8px;
+}
+button.tatparyam-panel-header .toggle-icon{ margin-left: auto; opacity: .75; }
+button.tatparyam-panel-header:hover{ opacity: .85; }
+button.tatparyam-panel-header:focus-visible{ outline: 2px solid currentColor; outline-offset: 3px; }

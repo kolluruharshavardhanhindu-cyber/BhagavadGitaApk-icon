@@ -38,63 +38,356 @@ function getViewTotal(num){
   return gitaData[num] ? gitaData[num].slokas.length : 0;
 }
 
-/* ─── GLOBAL AUDIO CONTROLLER ─────────────────────── */
-let currentAudio = null;
-let activeSlokaDiv = null;    // currently highlighted sloka box
+/* ─── GLOBAL AUDIO CONTROLLER ───────────────────────────────
+   ONE shared <audio> element and ONE state object (Player) drive every kind of playback:
+     • mode "single": one sloka. Icon click = loops until stopped; icon double-click = plays once.
+     • mode "range" : Play All / double-click popup. A flat list of steps, played in order.
+   The popup is only a view + remote control for this state. Showing or hiding it never touches playback.
+   Event listeners are attached to the audio element exactly once, and every async result is checked
+   against Player.token so a stale callback can never act on a newer playback request. */
+let currentAudio = null;     // the shared <audio> element (kept for backwards compatibility)
+let activeSlokaDiv = null;   // currently highlighted sloka box
+let activeAudioBtn = null;   // its audio icon
 
-function stopCurrentAudio(){
-  if(currentAudio){
-    currentAudio.pause();
-    currentAudio.currentTime = 0;
-    currentAudio = null;
-  }
-  document.querySelectorAll(".sloka-audio-btn")
-    .forEach(btn => btn.innerText = "volume_up");
-  clearActiveHighlight();
-}
-
-function clearActiveHighlight(){
-  if(activeSlokaDiv){
-    activeSlokaDiv.classList.remove("sloka-playing");
-    activeSlokaDiv = null;
-  }
-}
-
-/* ─── RANGE PLAYER STATE ─────────────────────────────
-   Shared by the "Play All" button (locked to the whole
-   chapter) and double-clicking a sloka (editable range). */
-let rangePlayer = {
-  active: false,
-  num: null,
-  list: [],   // ordered list of 0-based sloka indices to play
-  pos: 0,
-  speed: 1
+const Player = {
+  audio: null,
+  mode: "idle",     // "idle" | "single" | "range"
+  status: "idle",   // "idle" | "playing" | "paused"
+  num: null,        // chapter number or special-view key
+  idx: -1,          // 0-based sloka currently loaded
+  loop: false,      // single mode only
+  list: [],         // range mode: [{ i, g, rep, reps }]  i = sloka index, g = group id (for Previous/Next)
+  pos: 0,           // range mode: position inside list
+  pattern: "A",     // "A" = repeat each sloka, "B" = repeat the sequence
+  from: 1, to: 1,   // configured range (1-based)
+  speed: 1,
+  token: 0,         // bumped for every load/stop: invalidates stale callbacks
+  failedFor: -1,    // token whose failure was already reported (error event + rejected play() = one report)
+  failures: 0       // consecutive failed slokas (stops runaway skipping)
 };
 let selectedSpeed = 1;
+
+function notify(message, type){
+  if(window.GitaUI && typeof window.GitaUI.toast === "function") window.GitaUI.toast(message, { type: type || "info" });
+  else if(window.console) console.warn(message);
+}
+
+/* ─── Screen awake (Wake Lock API + optional Android bridge) ───
+   Requested only while audio is actually playing. Released on pause / stop / finish.
+   The browser drops a wake lock whenever the page is hidden, so it is re-requested on return.
+   Inside the Android app the WebView needs help from the native side: if the host app exposes
+   window.GitaAndroid.setKeepScreenOn(boolean) (see ANDROID_INTEGRATION.md) it is called too. */
+const ScreenAwake = {
+  want: false, sentinel: null, pending: false, nativeOn: false,
+  set(on){
+    this.want = !!on;
+    if(this.nativeOn !== this.want){
+      this.nativeOn = this.want;
+      try {
+        if(window.GitaAndroid && typeof window.GitaAndroid.setKeepScreenOn === "function") window.GitaAndroid.setKeepScreenOn(this.want);
+      } catch(e){}
+    }
+    if(this.want) this.acquire(); else this.release();
+  },
+  acquire(){
+    if(!this.want || this.sentinel || this.pending) return;           /* never stack requests */
+    if(!navigator.wakeLock || typeof navigator.wakeLock.request !== "function") return;   /* unsupported: fail quietly */
+    if(document.visibilityState !== "visible") return;                /* browsers reject requests from hidden pages */
+    this.pending = true;
+    navigator.wakeLock.request("screen").then((s) => {
+      this.pending = false;
+      if(!this.want){ s.release().catch(()=>{}); return; }            /* playback ended while the request was in flight */
+      this.sentinel = s;
+      s.addEventListener("release", () => { if(this.sentinel === s) this.sentinel = null; });
+    }).catch(() => { this.pending = false; });                        /* denied (e.g. battery saver): carry on silently */
+  },
+  release(){
+    const s = this.sentinel;
+    this.sentinel = null;
+    if(s) s.release().catch(()=>{});
+  }
+};
+document.addEventListener("visibilitychange", () => { if(document.visibilityState === "visible") ScreenAwake.acquire(); });
+window.addEventListener("pagehide", () => ScreenAwake.set(false));
+
+/* ─── audio element + its (single) set of listeners ─── */
+function getAudio(){
+  if(Player.audio) return Player.audio;
+  const a = new Audio();
+  a.preload = "auto";
+  a.addEventListener("playing", onAudioPlaying);
+  a.addEventListener("pause",   onAudioPause);
+  a.addEventListener("ended",   onAudioEnded);
+  a.addEventListener("error",   onAudioError);
+  Player.audio = a;
+  currentAudio = a;
+  return a;
+}
+
+function onAudioPlaying(){
+  if(Player.mode === "idle" || !Player.audio || Player.audio.paused) return;
+  Player.failures = 0;
+  if(Player.status !== "playing"){ Player.status = "playing"; syncUI(); }   /* e.g. resumed from a headset / lock-screen control */
+}
+function onAudioPause(){
+  const a = Player.audio;
+  if(Player.mode === "idle" || Player.status !== "playing" || !a || a.ended) return;
+  Player.status = "paused";   /* paused by the system (call, headset unplugged…): reflect it truthfully */
+  syncUI();
+}
+function onAudioEnded(){
+  if(Player.status !== "playing") return;
+  if(Player.mode === "range") goToPos(Player.pos + 1);
+  else stopAll();             /* single sloka played once */
+}
+function onAudioError(){
+  if(Player.mode === "idle") return;
+  handleFailure();
+}
+function onPlayRejected(err, token){
+  if(token !== Player.token) return;                              /* a newer request replaced this one */
+  const name = err && err.name;
+  if(name === "AbortError") return;
+  if(name === "NotAllowedError"){                                 /* autoplay policy: wait for the person */
+    Player.status = "paused"; syncUI();
+    notify("Tap Continue to start playback.");
+    return;
+  }
+  handleFailure();
+}
+function handleFailure(){
+  if(Player.failedFor === Player.token) return;
+  Player.failedFor = Player.token;
+  Player.failures++;
+  const bad = Player.idx;
+  notify("Couldn’t play audio for sloka " + (bad + 1) + " (file missing or no connection).", "error");
+  if(Player.mode === "range" && Player.failures < 3){
+    let p = Player.pos;
+    while(p < Player.list.length && Player.list[p].i === bad) p++;   /* skip every remaining repeat of the bad sloka */
+    if(p < Player.list.length){ goToPos(p); return; }
+  }
+  stopAll();
+}
+
+/* ─── core transitions ─── */
+function playCurrent(){
+  const a = getAudio();
+  const url = getAudioUrl(Player.num, Player.idx);
+  const token = ++Player.token;
+  a.loop = (Player.mode === "single" && Player.loop);
+  a.defaultPlaybackRate = Player.speed;
+  if(a.getAttribute("src") !== url) a.src = url;                  /* new file: the browser cancels the old load */
+  else { try { a.currentTime = 0; } catch(e){} }                  /* same file again (repeats): just rewind */
+  a.playbackRate = Player.speed;
+  Player.status = "playing";
+  markActive();
+  syncUI();
+  let p;
+  try { p = a.play(); } catch(e){ onPlayRejected(e, token); return; }
+  if(p && typeof p.catch === "function") p.catch((err) => onPlayRejected(err, token));
+}
+
+function startSingle(num, i, loop){
+  Player.mode = "single"; Player.num = num; Player.idx = i; Player.loop = !!loop;
+  Player.list = []; Player.pos = 0; Player.speed = 1; Player.failures = 0;
+  playCurrent();
+}
+
+function startRangeSequence(num, list, speed, meta){
+  meta = meta || {};
+  Player.mode = "range"; Player.num = num; Player.list = list; Player.pos = 0;
+  Player.pattern = meta.pattern || "A"; Player.from = meta.from || 1; Player.to = meta.to || list.length;
+  Player.speed = speed || 1; Player.failures = 0; Player.loop = false;
+  Player.idx = list.length ? list[0].i : -1;
+  if(Player.idx < 0){ stopAll(); return; }
+  playCurrent();
+}
+
+function goToPos(p){
+  if(Player.mode !== "range") return;
+  if(p < 0 || p >= Player.list.length){ stopAll(); return; }      /* sequence finished */
+  Player.pos = p;
+  Player.idx = Player.list[p].i;
+  playCurrent();
+}
+
+function pauseSession(){
+  if(Player.mode === "idle" || Player.status !== "playing") return;
+  Player.status = "paused";                                       /* set first: the pause event is then a no-op */
+  if(Player.audio) Player.audio.pause();                          /* currentTime is kept */
+  syncUI();
+}
+function resumeSession(){
+  if(Player.mode === "idle" || Player.status !== "paused" || !Player.audio) return;
+  Player.status = "playing";
+  syncUI();
+  const token = Player.token;
+  let p;
+  try { p = Player.audio.play(); } catch(e){ onPlayRejected(e, token); return; }
+  if(p && typeof p.catch === "function") p.catch((err) => onPlayRejected(err, token));
+}
+function groupTarget(delta){
+  if(Player.mode !== "range") return -1;
+  const g = Player.list[Player.pos].g + delta;
+  return Player.list.findIndex(e => e.g === g);                   /* first step of that group, or -1 at the boundary */
+}
+function nextStep(){ const p = groupTarget(+1); if(p >= 0) goToPos(p); }
+function prevStep(){ const p = groupTarget(-1); if(p >= 0) goToPos(p); }
+
+function stopAll(){
+  Player.token++;
+  Player.mode = "idle"; Player.status = "idle"; Player.list = []; Player.pos = 0; Player.idx = -1;
+  Player.loop = false; Player.failures = 0; Player.failedFor = -1;
+  if(Player.audio){
+    Player.audio.loop = false;
+    Player.audio.pause();
+    try { Player.audio.currentTime = 0; } catch(e){}
+  }
+  clearActiveHighlight();
+  syncUI();
+}
+
+/* Backwards-compatible names used elsewhere in this file */
+function stopCurrentAudio(){ stopAll(); }
+function resetRangePlayer(){ stopAll(); }
+function stopRangeMode(){ stopAll(); }
+function stopPlayAllMode(){ stopAll(); }   /* header stop button (id="stopPlayAllBtn") */
+
+/* ─── highlight + UI synchronisation ─── */
+function clearActiveHighlight(){
+  if(activeSlokaDiv) activeSlokaDiv.classList.remove("sloka-playing", "sloka-paused");
+  if(activeAudioBtn) activeAudioBtn.innerText = "volume_up";
+  activeSlokaDiv = null; activeAudioBtn = null;
+}
+function markActive(){
+  const div = slokaContainer.children[Player.idx] || null;
+  if(div === activeSlokaDiv) return;
+  clearActiveHighlight();
+  activeSlokaDiv = div;
+  if(!div) return;
+  activeAudioBtn = div.querySelector(".sloka-audio-btn");
+  if(Player.mode === "range") div.scrollIntoView({ behavior: "smooth", block: "center" });
+}
 
 const rangeModal      = document.getElementById("rangeModal");
 const playAllBtn      = document.getElementById("playAllBtn");
 const playAllLabel    = document.getElementById("playAllLabel");
 const stopPlayAllBtn  = document.getElementById("stopPlayAllBtn");
 
+function syncUI(){
+  const active  = Player.mode !== "idle";
+  const playing = Player.status === "playing";
+  if(activeSlokaDiv){
+    activeSlokaDiv.classList.toggle("sloka-playing", active);
+    activeSlokaDiv.classList.toggle("sloka-paused", active && !playing);
+  }
+  if(activeAudioBtn) activeAudioBtn.innerText = !active ? "volume_up" : (playing ? "stop_circle" : "play_circle");
+  if(playAllBtn){
+    playAllBtn.classList.toggle("armed", Player.mode === "range");
+    stopPlayAllBtn.classList.toggle("hidden", Player.mode !== "range");
+  }
+  updateTransportUI();
+  ScreenAwake.set(playing);
+}
+
+function updateTransportUI(){
+  const now = document.getElementById("rangeNow");
+  if(!now) return;
+  const active  = Player.mode !== "idle";
+  const playing = Player.status === "playing";
+  now.classList.toggle("hidden", !active);
+  now.dataset.state = active ? (playing ? "playing" : "paused") : "idle";
+  const set = (id, fn) => { const el = document.getElementById(id); if(el) fn(el); };
+  set("tpPrev",  b => { b.disabled = !(active && groupTarget(-1) >= 0); });
+  set("tpNext",  b => { b.disabled = !(active && groupTarget(+1) >= 0); });
+  set("tpPause", b => { b.disabled = !(active && playing);  b.classList.toggle("is-on", active && playing); });
+  set("tpPlay",  b => { b.disabled = !(active && !playing); b.classList.toggle("is-on", active && !playing); });
+  set("tpStop",  b => { b.disabled = !active; });
+  if(!active) return;
+  let label, sub;
+  if(Player.mode === "range"){
+    const e = Player.list[Player.pos];
+    label = "Sloka " + (Player.idx + 1) + " · " + (Player.pattern === "A" ? "repeat " : "round ") + e.rep + " of " + e.reps;
+    sub = "Slokas " + Player.from + "–" + Player.to + " · step " + (Player.pos + 1) + " of " + Player.list.length;
+  } else {
+    label = "Sloka " + (Player.idx + 1);
+    sub = Player.loop ? "Looping until you stop it" : "Playing once";
+  }
+  set("rangeNowLabel", el => { el.textContent = (playing ? "" : "Paused · ") + label; });
+  set("rangeNowSub",   el => { el.textContent = sub; });
+}
+
+function bindTransport(){
+  const on = (id, fn) => { const b = document.getElementById(id); if(b) b.addEventListener("click", fn); };
+  const refocus = (id) => { const b = document.getElementById(id); if(b && !b.disabled) b.focus({ preventScroll: true }); };
+  on("tpPrev",  () => prevStep());
+  on("tpNext",  () => nextStep());
+  on("tpPause", () => { pauseSession();  refocus("tpPlay"); });
+  on("tpPlay",  () => { resumeSession(); refocus("tpPause"); });
+  on("tpStop",  () => stopAll());
+}
+bindTransport();
+
+/* ─── RANGE SETTINGS (kept per chapter/view for the browser session) ───
+   The popup's inputs live in the page and are only populated when the view changes, so closing and
+   reopening the popup never resets them. "Reset settings" (or starting a different chapter) does. */
+const RANGE_SETTINGS_KEY = "gitaRangeSettings";
+let rangeSettings = {};
+try { rangeSettings = JSON.parse(sessionStorage.getItem(RANGE_SETTINGS_KEY) || "{}") || {}; } catch(e){ rangeSettings = {}; }
+function saveRangeSettings(num, patch){
+  const key = String(num);
+  rangeSettings[key] = Object.assign({}, rangeSettings[key], patch);
+  try { sessionStorage.setItem(RANGE_SETTINGS_KEY, JSON.stringify(rangeSettings)); } catch(e){}
+}
+
+function rangeInputs(){
+  return { from: document.getElementById("rangeFrom"), to: document.getElementById("rangeTo"), it: document.getElementById("rangeIterations") };
+}
+function showRangeError(message, field){
+  const box = document.getElementById("rangeError");
+  const inp = rangeInputs();
+  [inp.from, inp.to, inp.it].forEach(i => { if(i) i.removeAttribute("aria-invalid"); });
+  if(!box) return;
+  box.textContent = message || "";
+  box.classList.toggle("hidden", !message);
+  if(message && field){ field.setAttribute("aria-invalid", "true"); try { field.focus({ preventScroll: true }); } catch(e){} }
+}
+function parseWhole(v){ v = String(v == null ? "" : v).trim(); return /^\d+$/.test(v) ? parseInt(v, 10) : NaN; }
+function readRangeConfig(total){
+  const inp = rangeInputs();
+  const from = parseWhole(inp.from.value), to = parseWhole(inp.to.value), it = parseWhole(inp.it.value);
+  if(isNaN(from) || isNaN(to)) return { error: "Enter whole numbers for From and To.", field: isNaN(from) ? inp.from : inp.to };
+  if(from < 1 || from > total) return { error: "From must be between 1 and " + total + ".", field: inp.from };
+  if(to < 1 || to > total)     return { error: "To must be between 1 and " + total + ".", field: inp.to };
+  if(from > to)                return { error: "From can’t be greater than To.", field: inp.from };
+  if(isNaN(it) || it < 1 || it > 20) return { error: "Iterations must be a whole number from 1 to 20.", field: inp.it };
+  return { from: from, to: to, iterations: it };
+}
+
 /* ─── RANGE PLAYER: modal controls ─────────────────────── */
 function openRangeModal(locked){
   const num = getCurrentViewNum();
   const total = num === null ? 0 : getViewTotal(num);
-  if(!total) return;
+  if(!total || !rangeModal) return;
 
-  const fromInput = document.getElementById("rangeFrom");
-  const toInput   = document.getElementById("rangeTo");
+  const inp = rangeInputs();
+  const key = String(num) + (locked ? "|all" : "|sel");   /* Play All and double-tap keep separate settings */
+  inp.from.max = inp.to.max = String(total);
 
-  fromInput.value = 1;
-  toInput.value   = total;
-  fromInput.readOnly = locked;
-  toInput.readOnly   = locked;
-  fromInput.classList.toggle("locked-input", locked);
-  toInput.classList.toggle("locked-input", locked);
-
-  document.getElementById("rangeIterations").value = 1;
-  setActiveSpeedButton(1);
+  if(rangeModal.dataset.view !== key){               /* first time for this chapter/view: restore or default */
+    const s = rangeSettings[key] || {};
+    const ok = (n) => Number.isInteger(n) && n >= 1 && n <= total;
+    inp.from.value = ok(s.from) ? s.from : 1;
+    inp.to.value   = ok(s.to) && s.to >= (+inp.from.value) ? s.to : total;
+    inp.it.value   = Number.isInteger(s.iterations) && s.iterations >= 1 && s.iterations <= 20 ? s.iterations : 1;
+    setActiveSpeedButton([0.75, 1, 1.25, 1.5].indexOf(s.speed) >= 0 ? s.speed : 1, false);
+    rangeModal.dataset.view = key;
+  }
+  /* Play All: first and last sloka are fixed to the whole chapter. Double-tap: both are editable. */
+  if(locked){ inp.from.value = 1; inp.to.value = total; }
+  inp.from.readOnly = inp.to.readOnly = !!locked;
+  inp.from.classList.toggle("locked-input", !!locked); inp.to.classList.toggle("locked-input", !!locked);
+  showRangeError("");
 
   const title = document.getElementById("rangeModalTitle");
   if(title) title.innerText = locked ? "Play All Slokas" : "Play Selected Slokas";
@@ -111,7 +404,9 @@ function openRangeModal(locked){
   if(!coarse) setTimeout(() => { const it = document.getElementById("rangeIterations"); if(it) it.focus({preventScroll:true}); }, 60);
 }
 
+/* Hiding the popup NEVER stops or resets playback. */
 function closeRangeModal(){
+  if(!rangeModal) return;
   rangeModal.classList.add("hidden");
   rangeModal.style.display = "none";
   rangeModal.style.top = rangeModal.style.height = "";
@@ -147,194 +442,103 @@ if(rangeModal){   /* GitaTest.html also loads this file but has no Play All popu
   rangeModal.addEventListener("focusin", (e) => {
     if(e.target && e.target.matches && e.target.matches("input")) setTimeout(fitRangeModalToViewport, 320);
   });
-  /* tap on the dimmed backdrop closes the popup */
+  /* tap on the dimmed backdrop closes the popup (playback keeps going) */
   rangeModal.addEventListener("click", (e) => {
     /* ignore the trailing click of the double-tap that just opened the popup */
-    if(e.target === rangeModal && Date.now() - (+rangeModal.dataset.openedAt || 0) > 700) cancelRangeModal();
+    if(e.target === rangeModal && Date.now() - (+rangeModal.dataset.openedAt || 0) > 700) closeRangeModal();
+  });
+  ["rangeFrom", "rangeTo", "rangeIterations"].forEach((id) => {
+    const el = document.getElementById(id);
+    if(el) el.addEventListener("input", () => showRangeError(""));
   });
 }
 
-function cancelRangeModal(){
-  closeRangeModal();
-  stopRangeMode();
-}
+/* Kept for the existing markup: closing the popup no longer stops playback. */
+function cancelRangeModal(){ closeRangeModal(); }
 
 /* Escape closes the Play All popup (V6 behaviour) */
 document.addEventListener("keydown", (e) => {
-  if(e.key === "Escape" && rangeModal && rangeModal.style.display === "flex") cancelRangeModal();
+  if(e.key === "Escape" && rangeModal && rangeModal.style.display === "flex") closeRangeModal();
 });
 
-function setActiveSpeedButton(speed){
+function setActiveSpeedButton(speed, live){
   selectedSpeed = speed;
-  document.querySelectorAll(".range-speed-btn").forEach(b=>{
-    b.classList.toggle("active", parseFloat(b.dataset.speed) === speed);
+  document.querySelectorAll(".range-speed-btn").forEach(b => {
+    const on = parseFloat(b.dataset.speed) === speed;
+    b.classList.toggle("active", on);
+    b.setAttribute("aria-pressed", on ? "true" : "false");
   });
+  if(live && Player.mode !== "idle" && Player.audio){     /* change speed of what is playing right now */
+    Player.speed = speed;
+    Player.audio.defaultPlaybackRate = speed;
+    Player.audio.playbackRate = speed;
+  }
 }
 
-document.querySelectorAll(".range-speed-btn").forEach(btn=>{
+document.querySelectorAll(".range-speed-btn").forEach(btn => {
   btn.addEventListener("click", () => {
-    setActiveSpeedButton(parseFloat(btn.dataset.speed));
+    const speed = parseFloat(btn.dataset.speed);
+    setActiveSpeedButton(speed, true);
+    const k = rangeModal && rangeModal.dataset.view;
+    if(k) saveRangeSettings(k, { speed: speed });
   });
 });
+
+/* Explicit "Reset settings": restores the form defaults. Playback is NOT touched. */
+function resetRangeSettings(){
+  const num = getCurrentViewNum();
+  const total = num === null ? 0 : getViewTotal(num);
+  if(!total) return;
+  const inp = rangeInputs();
+  inp.from.value = 1; inp.to.value = total; inp.it.value = 1;
+  setActiveSpeedButton(1, false);
+  showRangeError("");
+  try { delete rangeSettings[(rangeModal && rangeModal.dataset.view) || String(num)]; sessionStorage.setItem(RANGE_SETTINGS_KEY, JSON.stringify(rangeSettings)); } catch(e){}
+}
 
 function startRangePattern(patternType){
   const num = getCurrentViewNum();
   const total = num === null ? 0 : getViewTotal(num);
   if(!total) return;
 
-  let from = parseInt(document.getElementById("rangeFrom").value, 10);
-  let to   = parseInt(document.getElementById("rangeTo").value, 10);
-  let iterations = parseInt(document.getElementById("rangeIterations").value, 10);
+  const cfg = readRangeConfig(total);
+  if(cfg.error){ showRangeError(cfg.error, cfg.field); return; }   /* invalid input: nothing starts, nothing resets */
+  showRangeError("");
 
-  if(isNaN(from) || from < 1) from = 1;
-  if(isNaN(to) || to > total) to = total;
-  if(to < 1) to = 1;
-  if(from > to){ const t = from; from = to; to = t; }
-  if(isNaN(iterations) || iterations < 1) iterations = 1;
-  if(iterations > 20) iterations = 20;
+  const from = cfg.from, to = cfg.to, iterations = cfg.iterations;
+  saveRangeSettings((rangeModal && rangeModal.dataset.view) || String(num), { from: from, to: to, iterations: iterations, speed: selectedSpeed, pattern: patternType });
 
   const list = [];
-  if(patternType === 'A'){
+  if(patternType === "A"){
     // repeat each sloka N times before moving on: 1,1,1,2,2,2,3,3,3...
     for(let idx = from; idx <= to; idx++){
-      for(let k = 0; k < iterations; k++) list.push(idx - 1);
+      for(let k = 0; k < iterations; k++) list.push({ i: idx - 1, g: idx - from, rep: k + 1, reps: iterations });
     }
   } else {
     // repeat the whole sequence N times: 1,2,3,1,2,3,1,2,3...
     for(let k = 0; k < iterations; k++){
-      for(let idx = from; idx <= to; idx++) list.push(idx - 1);
+      for(let idx = from; idx <= to; idx++) list.push({ i: idx - 1, g: list.length, rep: k + 1, reps: iterations });
     }
   }
 
   closeRangeModal();
-  startRangeSequence(num, list, selectedSpeed);
-}
-
-/* ─── RANGE PLAYER: sequential playback ─────────────────────── */
-function startRangeSequence(num, list, speed){
-  stopCurrentAudio();
-  rangePlayer.active = true;
-  rangePlayer.num = num;
-  rangePlayer.list = list;
-  rangePlayer.pos = 0;
-  rangePlayer.speed = speed;
-  updateRangePlayerUI();
-  playRangeStep();
-}
-
-function playRangeStep(){
-  if(!rangePlayer.active) return;
-
-  const num = rangePlayer.num;
-  if(rangePlayer.pos >= rangePlayer.list.length){
-    stopRangeMode();
-    return;
-  }
-
-  const i = rangePlayer.list[rangePlayer.pos];
-  clearActiveHighlight();
-  const div = slokaContainer.children[i];
-  if(!div){
-    rangePlayer.pos++;
-    playRangeStep();
-    return;
-  }
-  const audioBtn = div.querySelector(".sloka-audio-btn");
-  div.classList.add("sloka-playing");
-  activeSlokaDiv = div;
-  div.scrollIntoView({ behavior: "smooth", block: "center" });
-
-  const audioFile = getAudioUrl(num, i);
-  currentAudio = new Audio(audioFile);
-  currentAudio.playbackRate = rangePlayer.speed;
-  currentAudio.play().then(()=>{
-    audioBtn.innerText = "stop_circle";
-  }).catch(()=>{
-    // file missing/failed — skip to next in the list
-    audioBtn.innerText = "volume_up";
-    rangePlayer.pos++;
-    playRangeStep();
-  });
-  currentAudio.onended = () => {
-    if(!rangePlayer.active) return;
-    audioBtn.innerText = "volume_up";
-    rangePlayer.pos++;
-    playRangeStep();
-  };
-}
-
-function resetRangePlayer(){
-  rangePlayer.active = false;
-  clearActiveHighlight();
-  updateRangePlayerUI();
-}
-
-function stopRangeMode(){
-  rangePlayer.active = false;
-  updateRangePlayerUI();
-  stopCurrentAudio();
-}
-
-// Kept for the existing header stop button (id="stopPlayAllBtn").
-function stopPlayAllMode(){
-  stopRangeMode();
-}
-
-function updateRangePlayerUI(){
-  if(!playAllBtn) return;
-  if(rangePlayer.active){
-    playAllBtn.classList.add("armed");
-    stopPlayAllBtn.classList.remove("hidden");
-  } else {
-    playAllBtn.classList.remove("armed");
-    stopPlayAllBtn.classList.add("hidden");
-  }
+  startRangeSequence(num, list, selectedSpeed, { from: from, to: to, pattern: patternType });
 }
 
 /* ─── Single click / double click on a sloka's audio icon ── */
 function handleSingleAudioClick(num, i, audioBtn){
-  const audioFile = getAudioUrl(num, i);
-
-  if(rangePlayer.active){
-    // Clicking the (playing) audio button stops the range/loop feature entirely
-    stopRangeMode();
+  /* The icon of the sloka that is already active acts as stop (or continue, if it was paused). */
+  if(Player.mode !== "idle" && Player.num === num && Player.idx === i){
+    if(Player.status === "paused") resumeSession(); else stopAll();
     return;
   }
-
-  // Normal single play/pause toggle — no repeat, no auto-continue
-  if(currentAudio && currentAudio.src.includes(audioFile) && !currentAudio.paused){
-    stopCurrentAudio();
-    return;
-  }
-  stopCurrentAudio();
-  currentAudio = new Audio(audioFile);
-  currentAudio.play().then(()=>{
-    audioBtn.innerText = "stop_circle";
-  }).catch(()=>{
-    alert("Audio file not found !!!");
-  });
-  currentAudio.onended = () => {
-    audioBtn.innerText = "volume_up";
-    currentAudio = null;
-  };
+  /* Any other sloka replaces whatever is playing (single shared audio element: no overlap) and loops. */
+  startSingle(num, i, true);
 }
 
 function handleDoubleAudioClick(num, i, audioBtn){
-  // Double-click always stops the range/loop feature and plays just this one sloka
-  stopRangeMode();
-  stopCurrentAudio();
-
-  const audioFile = getAudioUrl(num, i);
-  currentAudio = new Audio(audioFile);
-  currentAudio.play().then(()=>{
-    audioBtn.innerText = "stop_circle";
-  }).catch(()=>{
-    alert("Audio file not found !!!");
-  });
-  currentAudio.onended = () => {
-    audioBtn.innerText = "volume_up";
-    currentAudio = null;
-  };
+  /* Double-click keeps its original meaning: play just this sloka once, replacing any session. */
+  startSingle(num, i, false);
 }
 
 const home           = document.getElementById("home");
@@ -762,6 +966,7 @@ function loadFromHash(){
   const hash = location.hash;
 
   if(!hash.startsWith("#chapter-") && !isSpecialView(getCurrentViewNum())){
+    closeRangeModal();
     home.classList.remove("hidden");
     viewer.classList.add("hidden");
     return;
@@ -831,20 +1036,37 @@ function loadFromHash(){
     tatBtn.className = "tatparyam-btn";
     tatBtn.innerHTML = `<span class="material-symbols-outlined btn-icon">auto_stories</span><span class="btn-label">${tatparyamLabel[currentLang] || "తాత్పర్యం"}</span>`;
 
+    tatBtn.setAttribute('aria-expanded', 'false');
+    /* One place decides open/closed, so the button and the heading can never disagree
+       (and the panel is never duplicated: it is only shown or hidden). */
+    const setTatOpen = (open) => {
+      panel.classList.toggle('visible', open);
+      tatBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    };
+    /* The heading inside the panel is a real <button>: click / Enter / Space hide the explanation. */
+    panel.addEventListener('click', (e) => {
+      const heading = e.target.closest('.tatparyam-heading');
+      if(!heading) return;
+      e.stopPropagation();                         /* never reach sloka-level handlers */
+      const hadFocus = document.activeElement === heading;
+      setTatOpen(false);
+      if(hadFocus) tatBtn.focus({ preventScroll: true });
+    });
     tatBtn.onclick = () => {
       /* Toggle: if already visible, hide it */
       if(panel.classList.contains('visible')){
-        panel.classList.remove('visible');
+        setTatOpen(false);
         return;
       }
       /* Build content from the meaning data files (loaded on first use) */
       if(panel.innerHTML.trim() === '' || panel.dataset.failed){
         delete panel.dataset.failed;
         const header = `
-          <div class="tatparyam-panel-header">
-            <span class="material-symbols-outlined" style="font-size:15px;">auto_stories</span>
-            ${tatparyamLabel[currentLang] || "తాత్పర్యం"}
-          </div>`;
+          <button type="button" class="tatparyam-panel-header tatparyam-heading" aria-expanded="true">
+            <span class="material-symbols-outlined" style="font-size:15px;" aria-hidden="true">auto_stories</span>
+            <span>${tatparyamLabel[currentLang] || "తాత్పర్యం"}</span>
+            <span class="material-symbols-outlined toggle-icon" style="font-size:18px;" aria-hidden="true">expand_less</span>
+          </button>`;
         const lang = currentLang;
         panel.innerHTML = header + '<div><em style="opacity:0.6;">…</em></div>';
         ensureMeaningData().then(() => {
@@ -859,24 +1081,20 @@ function loadFromHash(){
           panel.dataset.failed = '1';
         });
       }
-      panel.classList.add('visible');
+      setTatOpen(true);
     };
 
     /* ── Double-click anywhere on the sloka box (text/panel area)
            opens the Range Player, or exits range mode if already active ── */
     let lastTapAt = 0, lastTapX = 0, lastTapY = 0, lastOpenAt = 0;
     const onSlokaDouble = (e) => {
-      if(e.target.closest(".sloka-audio-btn") || e.target.closest(".tatparyam-btn")){
+      if(e.target.closest(".sloka-audio-btn") || e.target.closest(".tatparyam-btn") || e.target.closest(".tatparyam-heading")){
         return; // those have their own dblclick / click handling
       }
       const now = Date.now();
       if(now - lastOpenAt < 600) return;           /* dblclick + touch fallback must not fire twice */
       lastOpenAt = now;
-      if(rangePlayer.active){
-        stopRangeMode();
-        return;
-      }
-      openRangeModal(false);
+      openRangeModal(false);   /* playback (if any) keeps running; the popup holds Stop */
     };
     div.addEventListener("dblclick", onSlokaDouble);
     /* Some Android WebViews never fire dblclick: detect a double-tap ourselves */
@@ -912,6 +1130,6 @@ function navigate(page){ window.location.href = page; }
 
 function goBack(){
   stopCurrentAudio();
-  resetRangePlayer();
+  closeRangeModal();
   location.hash = "";
 }

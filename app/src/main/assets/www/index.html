@@ -39,12 +39,12 @@ tailwind.config = {
 }
 </script>
 
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=16102026a">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;600;800&family=Noto+Sans+Telugu:wght@400;600;700&family=Noto+Serif+Telugu:wght@400;600&family=Noto+Serif+Devanagari:wght@400;600&display=swap" rel="stylesheet">
 
 <link rel="stylesheet" href="glass.css?v=03102026a">
-<link rel="stylesheet" href="v6.css?v=03102026a">
+<link rel="stylesheet" href="v6.css?v=16102026a">
 <script src="glass.js?v=03102026a" defer></script>
 </head>
 
@@ -113,6 +113,19 @@ tailwind.config = {
       style="border-color:#ec6713;color:#ec6713;background:#fffaf0;">
 				  <span id="mahatyamBtnLabel">గీతా మాహాత్మ్యం</span>
 				</button>
+			
+<a href="https://github.com/kolluruharshavardhanhindu-cyber/BhagavadGita/raw/refs/heads/main/BhagavadGita.apk?raw=true"
+   download="BhagavadGita.apk"
+   id="gitaAppBtn"
+   class="rounded-full px-4 py-2 text-sm font-bold shadow-lg border-2 cursor-pointer"
+   title="Click to download the Bhagavad Gita app"
+   aria-label="Gita App – click to download the Bhagavad Gita app"
+   style="border-color:#ec6713;color:#ec6713;background:#fffaf0;">
+  <span class="material-symbols-outlined" aria-hidden="true">apps</span>
+  <span>Gita App</span>
+</a>
+<p class="gita-app-hint">Click on <b>Gita App</b> to download the Bhagavad Gita app</p>
+
 	  </div>
   <div id="chapterGrid" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-6">
   </div>
@@ -137,11 +150,20 @@ style="background:linear-gradient(#fffaf0,#f3e2c7);box-shadow:inset 0 0 80px rgb
 
   <div class="flex items-center justify-between mb-4 flex-wrap gap-3">
     <button onclick="goBack()" class="text-saffron font-bold">← Back</button>
-    <div class="flex items-center gap-2">
+    <div class="flex items-center gap-2 flex-wrap">
       <button id="playAllBtn" onclick="openRangeModal(true)" class="play-all-btn">
         <span class="material-symbols-outlined" style="font-size:18px;">playlist_play</span>
         <span id="playAllLabel">Play All</span>
       </button>
+      <div id="rangeNow" class="range-now hidden" data-state="idle">
+        <div class="range-transport" role="group" aria-label="Playback controls">
+          <button type="button" id="tpPrev"  class="tp-btn" aria-label="Previous sloka" title="Previous" disabled><span class="material-symbols-outlined" aria-hidden="true">chevron_left</span></button>
+          <button type="button" id="tpPause" class="tp-btn" aria-label="Pause" title="Pause" disabled><span class="material-symbols-outlined" aria-hidden="true">pause</span></button>
+          <button type="button" id="tpPlay"  class="tp-btn" aria-label="Continue" title="Continue" disabled><span class="material-symbols-outlined" aria-hidden="true">play_arrow</span></button>
+          <button type="button" id="tpNext"  class="tp-btn" aria-label="Next sloka" title="Next" disabled><span class="material-symbols-outlined" aria-hidden="true">chevron_right</span></button>
+        </div>
+        <span id="rangeNowLabel" class="range-now-label" aria-live="polite"></span>
+      </div>
       <button id="stopPlayAllBtn" onclick="stopPlayAllMode()" class="play-all-stop-btn hidden" title="Stop Play All">
         <span class="material-symbols-outlined" style="font-size:18px;">stop_circle</span>
       </button>
@@ -157,7 +179,7 @@ style="background:linear-gradient(#fffaf0,#f3e2c7);box-shadow:inset 0 0 80px rgb
   <div class="range-modal-box">
     <div class="modal-head">
       <h3 id="rangeModalTitle">Play Slokas</h3>
-      <button type="button" onclick="cancelRangeModal()" class="btn btn-icon btn-ghost btn-sm" aria-label="Close"><span class="material-symbols-outlined" aria-hidden="true">close</span></button>
+      <button type="button" onclick="closeRangeModal()" class="btn btn-icon btn-ghost btn-sm" aria-label="Close"><span class="material-symbols-outlined" aria-hidden="true">close</span></button>
     </div>
 
     <div class="range-field-row">
@@ -175,6 +197,8 @@ style="background:linear-gradient(#fffaf0,#f3e2c7);box-shadow:inset 0 0 80px rgb
       <label for="rangeIterations">Iterations (1–20)</label>
       <input id="rangeIterations" class="input play-all-input" type="number" min="1" max="20" value="1" inputmode="numeric" />
     </div>
+
+    <p id="rangeError" class="range-error hidden" role="alert"></p>
 
     <div class="range-field">
       <span class="field-label" style="margin:0" id="speedLabel">Speed</span>
@@ -194,10 +218,11 @@ style="background:linear-gradient(#fffaf0,#f3e2c7);box-shadow:inset 0 0 80px rgb
         <span>Repeat the sequence</span><small>1,2,3,1,2,3…</small>
       </button>
     </div>
+    <button type="button" onclick="resetRangeSettings()" class="btn btn-ghost btn-sm range-reset">Reset settings</button>
   </div>
 </div>
 
-<script src="app.js?v=03102026a"></script>
+<script src="app.js?v=16102026a"></script>
 
 </body>
 </html>

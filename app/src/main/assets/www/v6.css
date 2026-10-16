@@ -616,3 +616,39 @@ body.gt-page .page { padding-top: 6px; }
 .range-field-row > .range-field + .range-field { margin-top: 0; }
 
 body.modal-open { overflow: hidden; }
+
+
+/* ═════ 11. PLAYBACK CONTROLS (inside the Play popup) ═════════ */
+.range-now { display: flex; flex-direction: column; gap: .75rem; padding: .9rem 1rem; margin-bottom: 1.1rem; border-radius: var(--v6-radius-md); background: var(--v6-input-bg); border: 1px solid var(--v6-glass-border); }
+.range-now.hidden { display: none !important; }
+.range-now-info { display: flex; flex-direction: column; gap: .15rem; }
+.range-now-state { align-self: flex-start; font-size: .72rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; padding: .15rem .6rem; border-radius: var(--v6-radius-pill); background: var(--v6-glass-bg-strong); border: 1px solid var(--v6-glass-border); }
+.range-now[data-state="playing"] .range-now-state { color: #16a34a; }
+.range-now[data-state="paused"]  .range-now-state { color: #d97706; }
+.range-now-info strong { font-size: 1.05rem; font-weight: 800; }
+.range-now-info small { color: var(--v6-text-secondary); font-size: .82rem; }
+.range-transport { display: grid; grid-template-columns: repeat(4, 1fr); gap: .5rem; }
+.tp-btn { min-height: 48px; border-radius: 14px; border: 1px solid var(--v6-glass-border); background: var(--v6-glass-bg-strong); color: var(--v6-text-primary); display: inline-flex; align-items: center; justify-content: center; cursor: pointer; touch-action: manipulation; transition: background var(--v6-t-fast), transform var(--v6-t-fast), opacity var(--v6-t-fast); }
+.tp-btn .material-symbols-outlined { font-size: 28px; }
+.tp-btn:hover:not(:disabled) { transform: translateY(-1px); }
+.tp-btn:focus-visible, .range-speed-btn:focus-visible { outline: 2px solid var(--v6-text-primary); outline-offset: 2px; }
+.tp-btn:disabled { opacity: .35; cursor: not-allowed; }
+.tp-btn.is-on { background: linear-gradient(135deg, #ffe2a8, #f8b85e 55%, #f08b32); color: var(--v6-text-on-accent); border-color: transparent; }
+.tp-stop { align-self: flex-end; }
+.range-error { margin-top: .9rem; padding: .6rem .8rem; border-radius: var(--v6-radius-md); font-size: .88rem; font-weight: 650; color: #b91c1c; background: rgba(220, 38, 38, .1); border: 1px solid rgba(220, 38, 38, .35); }
+.range-error.hidden { display: none !important; }
+:root[data-theme="dark"] .range-error { color: #fca5a5; }
+.range-modal-box input[aria-invalid="true"] { border-color: #dc2626; }
+.range-reset { margin-top: .8rem; width: 100%; }
+
+/* Paused sloka keeps its highlight, drawn dashed and without the pulse */
+.sloka-box.sloka-paused { border-style: dashed !important; }
+.sloka-playing.sloka-paused .sloka-audio-btn { animation: none; }
+@media (prefers-reduced-motion: reduce) { .tp-btn { transition: none; } }
+
+/* Transport sits in the chapter header, right next to Play All */
+.range-now { flex-direction: row; align-items: center; flex-wrap: wrap; gap: .5rem; padding: 0; margin: 0; background: none; border: 0; }
+.range-now .range-transport { display: flex; gap: .35rem; }
+.range-now .tp-btn { min-height: 40px; width: 44px; border-radius: 12px; }
+.range-now .tp-btn .material-symbols-outlined { font-size: 24px; }
+.range-now-label { font-size: .8rem; font-weight: 700; color: var(--v6-text-secondary); white-space: nowrap; }
