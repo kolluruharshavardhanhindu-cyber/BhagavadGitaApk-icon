@@ -652,3 +652,39 @@ body.modal-open { overflow: hidden; }
 .range-now .tp-btn { min-height: 40px; width: 44px; border-radius: 12px; }
 .range-now .tp-btn .material-symbols-outlined { font-size: 24px; }
 .range-now-label { font-size: .8rem; font-weight: 700; color: var(--v6-text-secondary); white-space: nowrap; }
+
+/* ═══ Chapter header bar: Back · Play All · Stop on row 1, transport on row 2 ═══
+   A grid keeps Back on the left and Play All / Stop on the right at all times;
+   while a Play All sequence runs, the transport (prev / pause / play / next +
+   counter) gets its own centered row instead of wrapping into a lopsided blob. */
+#viewer > div:first-child{
+  display:grid!important;
+  grid-template-columns:auto 1fr auto auto;
+  align-items:center;
+  column-gap:0!important; row-gap:8px!important;
+  border-radius:26px!important;
+}
+#viewer > div:first-child > div{ display:contents; }
+#viewer > div:first-child > button:first-child{ grid-column:1; grid-row:1; white-space:nowrap; }
+#viewer .play-all-btn{ grid-column:3; grid-row:1; white-space:nowrap; min-height:40px; padding:0 16px; justify-content:center; line-height:1; }
+#viewer .play-all-stop-btn{ grid-column:4; grid-row:1; margin-left:8px; width:40px; height:40px; min-height:40px; padding:0; border-radius:50%; }
+#viewer .play-all-stop-btn.hidden, #viewer .range-now.hidden{ display:none!important; }
+#viewer .play-all-btn .material-symbols-outlined,
+#viewer .play-all-stop-btn .material-symbols-outlined{ line-height:1; display:inline-flex; align-items:center; justify-content:center; }
+#viewer .range-now{
+  grid-column:1 / -1; grid-row:2;
+  display:flex; flex-direction:row; flex-wrap:nowrap; align-items:center; justify-content:center;
+  gap:10px; padding:8px 0 2px; margin:0;
+  border-top:1px solid var(--v6-glass-border,rgba(255,255,255,.25));
+  background:none; border-left:0; border-right:0; border-bottom:0; border-radius:0;
+}
+#viewer .range-now .range-transport{ display:flex; flex:0 0 auto; gap:6px; }
+#viewer .range-now .tp-btn{ width:44px; min-width:44px; height:40px; min-height:40px; padding:0; border-radius:12px; flex:0 0 auto; }
+#viewer .range-now .tp-btn .material-symbols-outlined{ font-size:24px; line-height:1; }
+#viewer .range-now .range-now-label{ flex:0 1 auto; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:.8rem; }
+@media (max-width:380px){
+  #viewer > div:first-child{ padding:8px!important; }
+  #viewer .play-all-btn{ padding:0 12px; font-size:.8rem; }
+  #viewer .range-now{ gap:6px; }
+  #viewer .range-now .tp-btn{ width:40px; min-width:40px; }
+}
